@@ -432,6 +432,10 @@ pub const Action = union(enum) {
     /// End the current search if any and hide any GUI elements.
     end_search,
 
+    /// End the current search, promoting the currently selected match, if
+    /// any, into a real terminal selection.
+    end_search_with_selection,
+
     /// Clear the screen and all scrollback.
     clear_screen,
 
@@ -1390,6 +1394,7 @@ pub const Action = union(enum) {
             .search_selection,
             .start_search,
             .end_search,
+            .end_search_with_selection,
             .reset,
             .copy_to_clipboard,
             .copy_url_to_clipboard,

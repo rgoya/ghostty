@@ -153,6 +153,11 @@ pub const Message = union(enum) {
     /// Selected search index change
     search_selected: ?usize,
 
+    /// Start/end pins of the currently selected search match, used by
+    /// `end_search_with_selection` to promote it to a real selection.
+    /// Surface-internal; not forwarded to the apprt GUI.
+    search_selected_pins: ?terminal.highlight.Untracked,
+
     pub const ReportTitleStyle = enum {
         csi_21_t,
 

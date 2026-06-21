@@ -205,6 +205,12 @@ const Search = struct {
     state: terminal.search.Thread,
     thread: std.Thread,
 
+    /// The start/end pins of the currently selected match. This is cached
+    /// from the search thread's notifications so that `end_search_with_selection`
+    /// can promote it into a real terminal selection. Null when there is no
+    /// selected match.
+    selected_pins: ?terminal.highlight.Untracked = null,
+
     pub fn deinit(self: *Search) void {
         // Notify the thread to stop
         self.state.stop.notify() catch |err| log.err(
@@ -1189,6 +1195,10 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                 .{ .selected = v },
             );
         },
+
+        .search_selected_pins => |v| {
+            if (self.search) |*s| s.selected_pins = v;
+        },
     }
 }
 
@@ -1493,6 +1503,12 @@ fn searchCallback_(
                     .{ .search_selected = sel.idx },
                     .forever,
                 );
+
+                // Cache the match's pins to promote to selection on end_search_with_selection.
+                _ = self.surfaceMailbox().push(
+                    .{ .search_selected_pins = sel.highlight.untracked() },
+                    .forever,
+                );
             } else {
                 // Reset our selected match
                 _ = self.renderer_thread.mailbox.push(
@@ -1504,6 +1520,12 @@ fn searchCallback_(
                 // Reset the selected index
                 _ = self.surfaceMailbox().push(
                     .{ .search_selected = null },
+                    .forever,
+                );
+
+                // Clear the cached match pins.
+                _ = self.surfaceMailbox().push(
+                    .{ .search_selected_pins = null },
                     .forever,
                 );
             }
@@ -1542,6 +1564,10 @@ fn searchCallback_(
             );
             _ = self.surfaceMailbox().push(
                 .{ .search_selected = null },
+                .forever,
+            );
+            _ = self.surfaceMailbox().push(
+                .{ .search_selected_pins = null },
                 .forever,
             );
         },
@@ -4776,6 +4802,36 @@ fn hideMouse(self: *Surface) void {
     };
 }
 
+/// End the active search, if any, promoting the selected match to a real
+/// selection first when `promote` is true.
+fn endSearch(self: *Surface, promote: bool) !bool {
+    // We only return that this was performed if a search was actually
+    // active, but we always send the apprt end_search so that GUIs can
+    // clean up stale stuff.
+    const performed = self.search != null;
+
+    if (self.search) |*s| {
+        if (promote) {
+            if (s.selected_pins) |pins| {
+                // Promote under the renderer mutex (mirrors
+                // adjust_selection / copy_to_clipboard).
+                self.renderer_state.mutex.lockUncancelable(global.io());
+                defer self.renderer_state.mutex.unlock(global.io());
+
+                const sel = terminal.Selection.init(pins.start, pins.end, false);
+                try self.setSelection(sel);
+                try self.queueRender();
+            }
+        }
+
+        s.deinit();
+        self.search = null;
+    }
+
+    _ = try self.rt_app.performAction(.{ .surface = self }, .end_search, {});
+    return performed;
+}
+
 fn showMouse(self: *Surface) void {
     if (!self.mouse.hidden) return;
     self.mouse.hidden = false;
@@ -4936,25 +4992,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             );
         },
 
-        .end_search => {
-            // We only return that this was performed if we actually
-            // stopped a search, but we also send the apprt end_search so
-            // that GUIs can clean up stale stuff.
-            const performed = self.search != null;
-
-            if (self.search) |*s| {
-                s.deinit();
-                self.search = null;
-            }
-
-            _ = try self.rt_app.performAction(
-                .{ .surface = self },
-                .end_search,
-                {},
-            );
-
-            return performed;
-        },
+        .end_search => return self.endSearch(false),
+        .end_search_with_selection => return self.endSearch(true),
 
         .search => |text| search: {
             const s: *Search = if (self.search) |*s| s else init: {
