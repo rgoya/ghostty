@@ -853,6 +853,7 @@ const Search = struct {
 const TestUserData = struct {
     const Self = @This();
     reset: std.Io.Event = .unset,
+    selected_event: std.Io.Event = .unset,
     total: usize = 0,
     selected: ?Event.SelectedMatch = null,
     viewport: []FlattenedHighlight = &.{},
@@ -868,7 +869,10 @@ const TestUserData = struct {
             .quit => {},
             .complete => ud.reset.set(global.io()),
             .total_matches => |v| ud.total = v,
-            .selected_match => |v| ud.selected = v,
+            .selected_match => |v| {
+                ud.selected = v;
+                if (v != null) ud.selected_event.set(global.io());
+            },
             .viewport_matches => |v| {
                 for (ud.viewport) |*hl| hl.deinit(testing.allocator);
                 testing.allocator.free(ud.viewport);
@@ -974,4 +978,76 @@ test "select after active screen removal" {
     try thread.select(.next);
     try testing.expectEqual(ScreenSet.Key.primary, thread.search.?.last_screen.key);
     try testing.expect(!thread.search.?.screens.contains(.alternate));
+}
+
+test "selected match promotes to a selection with correct text" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var mutex: std.Io.Mutex = .init;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 20, .rows = 2 });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("Hello, world");
+
+    var ud: TestUserData = .{};
+    defer ud.deinit();
+    var thread: Thread = try .init(alloc, .{
+        .mutex = &mutex,
+        .terminal = &t,
+        .event_cb = &TestUserData.callback,
+        .event_userdata = &ud,
+    });
+    defer thread.deinit();
+
+    var os_thread = try std.Thread.spawn(
+        .{},
+        threadMain,
+        .{&thread},
+    );
+
+    // Start our search.
+    _ = thread.mailbox.push(
+        io,
+        .{ .change_needle = try .init(
+            alloc,
+            @as([]const u8, "world"),
+        ) },
+        .forever,
+    );
+    try thread.wakeup.notify();
+
+    // Wait for the search to complete.
+    try ud.reset.waitTimeout(io, .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(100),
+    } });
+
+    // Select the match so it becomes the "selected" match. This is the
+    // same message navigate_search uses. Nothing selects a match for us
+    // implicitly, so `selected_event` is guaranteed unset until now.
+    _ = thread.mailbox.push(io, .{ .select = .next }, .forever);
+    try thread.wakeup.notify();
+    try ud.selected_event.waitTimeout(io, .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(100),
+    } });
+
+    // Stop the thread now that we have our selected match.
+    try thread.stop.notify();
+    os_thread.join();
+
+    // Promote the selected match into a real terminal selection, exactly
+    // as Surface.endSearch does, and confirm it yields the needle text.
+    const unt = ud.selected.?.highlight.untracked();
+    const sel = Selection.init(unt.start, unt.end, false);
+    try t.screens.active.select(sel);
+
+    const str = try t.screens.active.selectionString(alloc, .{
+        .sel = sel,
+        .trim = false,
+    });
+    defer alloc.free(str);
+    try testing.expectEqualStrings("world", str);
 }

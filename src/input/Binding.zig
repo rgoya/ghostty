@@ -3369,6 +3369,18 @@ test "parse: action no parameters" {
     try testing.expectError(Error.InvalidFormat, parseSingle("a=ignore:A"));
 }
 
+test "parse: end_search_with_selection" {
+    const testing = std.testing;
+
+    try testing.expectEqual(
+        Binding{
+            .trigger = .{ .key = .{ .unicode = 'a' } },
+            .action = .{ .end_search_with_selection = {} },
+        },
+        try parseSingle("a=end_search_with_selection"),
+    );
+}
+
 test "parse: action with string" {
     const testing = std.testing;
 
