@@ -130,6 +130,16 @@ pub fn deinit(self: *Thread) void {
     }
 }
 
+/// Returns the selected match on the active screen, if any. See
+/// `TerminalSearch.selectedHighlight`.
+///
+/// This is only safe to call once the thread completes executing; the
+/// caller must join prior to this. The terminal mutex must also be held.
+pub fn selectedHighlight(self: *Thread) ?UntrackedHighlight {
+    const s = if (self.search) |*s| s else return null;
+    return s.selectedHighlight(self.opts.terminal);
+}
+
 /// The main entrypoint for the thread.
 pub fn threadMain(self: *Thread) void {
     // Call child function so we can use errors...
@@ -677,5 +687,72 @@ test {
             .x = 11,
             .y = 0,
         } }, t.screens.active.pages.pointFromPin(.screen, sel.end).?);
+    }
+}
+
+test "selectedHighlight after the thread is joined" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var mutex: std.Io.Mutex = .init;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 20, .rows = 2 });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("Hello, world");
+
+    var ud: TestUserData = .{};
+    defer ud.deinit();
+    var thread: Thread = try .init(alloc, .{
+        .mutex = &mutex,
+        .terminal = &t,
+        .event_cb = &TestUserData.callback,
+        .event_userdata = &ud,
+    });
+    defer thread.deinit();
+
+    var os_thread = try std.Thread.spawn(
+        .{},
+        threadMain,
+        .{&thread},
+    );
+
+    // Start our search and wait for it to complete.
+    _ = thread.mailbox.push(
+        io,
+        .{ .change_needle = try .init(
+            alloc,
+            @as([]const u8, "world"),
+        ) },
+        .forever,
+    );
+    try thread.wakeup.notify();
+    try ud.reset.waitTimeout(testing.io, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(100) } });
+
+    // Stop the thread. The search state remains valid until deinit.
+    try thread.stop.notify();
+    os_thread.join();
+
+    // Nothing selected yet.
+    {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        try testing.expect(thread.selectedHighlight() == null);
+    }
+
+    // Select the match (this takes the mutex itself) and read it back.
+    try thread.select(.next);
+    {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        const hl = thread.selectedHighlight().?;
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 7,
+            .y = 0,
+        } }, t.screens.active.pages.pointFromPin(.screen, hl.start).?);
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 11,
+            .y = 0,
+        } }, t.screens.active.pages.pointFromPin(.screen, hl.end).?);
     }
 }
