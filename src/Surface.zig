@@ -4884,8 +4884,9 @@ fn hideMouse(self: *Surface) void {
 }
 
 /// End the current search if any and notify the apprt so GUIs can
-/// hide any search elements.
-fn endSearch(self: *Surface) !bool {
+/// hide any search elements. If `select` is true, the selected search
+/// match (if any) becomes the terminal selection.
+fn endSearch(self: *Surface, select: bool) !bool {
     // We only return that this was performed if we actually
     // stopped a search, but we also send the apprt end_search so
     // that GUIs can clean up stale stuff.
@@ -4895,8 +4896,26 @@ fn endSearch(self: *Surface) !bool {
         // We stop the thread separately from freeing its state so
         // that we can read the final search state in between.
         s.stop();
-        s.state.deinit();
-        self.search = null;
+        defer {
+            s.state.deinit();
+            self.search = null;
+        }
+
+        if (select) select: {
+            // This lock must be released before the deferred state
+            // deinit runs, since that also grabs the terminal mutex.
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+
+            // The match may have been pruned or may be on a screen that
+            // is no longer active. Either way, there's nothing to select.
+            const hl = s.state.selectedHighlight() orelse break :select;
+
+            // Treat this like a completed mouse selection so that
+            // copy-on-select is respected.
+            try self.setSelectionAndCopy(.init(hl.start, hl.end, false));
+            try self.queueRender();
+        }
     }
 
     _ = try self.rt_app.performAction(
@@ -5068,7 +5087,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             );
         },
 
-        .end_search => return try self.endSearch(),
+        .end_search => return try self.endSearch(false),
+        .end_search_with_selection => return try self.endSearch(true),
 
         .search => |text| search: {
             const s: *Search = if (self.search) |*s| s else init: {
