@@ -210,6 +210,12 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = i18n.N_("End the current search if any and hide any GUI elements."),
         }},
 
+        .end_search_with_selection => comptime &.{.{
+            .action = .end_search_with_selection,
+            .title = i18n.N_("End Search and Select Match"),
+            .description = i18n.N_("End the search and turn the current match into a text selection."),
+        }},
+
         .navigate_search => comptime &.{ .{
             .action = .{ .navigate_search = .next },
             .title = i18n.N_("Next Search Result"),

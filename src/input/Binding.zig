@@ -432,6 +432,15 @@ pub const Action = union(enum) {
     /// End the current search if any and hide any GUI elements.
     end_search,
 
+    /// End the current search if any and turn the selected search match
+    /// into a text selection. The selection behaves the same as a mouse
+    /// selection, so it can be modified with `adjust_selection`, copied,
+    /// and respects `copy-on-select`. If no match is selected, this is
+    /// the same as `end_search`.
+    ///
+    /// This has no default keybinding.
+    end_search_with_selection,
+
     /// Clear the screen and all scrollback.
     clear_screen,
 
@@ -1387,6 +1396,7 @@ pub const Action = union(enum) {
             .search_selection,
             .start_search,
             .end_search,
+            .end_search_with_selection,
             .reset,
             .copy_to_clipboard,
             .copy_url_to_clipboard,
@@ -3359,6 +3369,18 @@ test "parse: action no parameters" {
         try parseSingle("a=ignore"),
     );
     try testing.expectError(Error.InvalidFormat, parseSingle("a=ignore:A"));
+}
+
+test "parse: end_search_with_selection" {
+    const testing = std.testing;
+
+    try testing.expectEqual(
+        Binding{
+            .trigger = .{ .key = .{ .unicode = 'a' } },
+            .action = .{ .end_search_with_selection = {} },
+        },
+        try parseSingle("a=end_search_with_selection"),
+    );
 }
 
 test "parse: action with string" {
