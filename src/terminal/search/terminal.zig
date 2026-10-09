@@ -3,6 +3,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const point = @import("../point.zig");
 const FlattenedHighlight = @import("../highlight.zig").Flattened;
+const UntrackedHighlight = @import("../highlight.zig").Untracked;
 const ScreenSet = @import("../ScreenSet.zig");
 const Terminal = @import("../Terminal.zig");
 
@@ -466,6 +467,38 @@ pub const TerminalSearch = struct {
         screen.scroll(.{ .pin = flattened.startPin() });
         return true;
     }
+
+    /// Returns the selected match on the active screen, if any.
+    ///
+    /// The selected match is tracked, so it follows its content as the
+    /// terminal scrolls, prunes, and reflows. This returns null if that
+    /// content was discarded or if the terminal's active screen isn't
+    /// the one the search last fed (e.g. we switched to the alternate
+    /// screen).
+    ///
+    /// This reads tracked pins that terminal IO modifies, so the caller
+    /// must ensure the terminal isn't modified for the duration of this
+    /// call (e.g. by holding a lock). The returned pins are untracked and
+    /// only valid until the terminal is next modified.
+    pub fn selectedHighlight(
+        self: *TerminalSearch,
+        t: *const Terminal,
+    ) ?UntrackedHighlight {
+        if (t.screens.active_key != self.active_key) return null;
+        const screen_search = self.screens.getPtr(self.active_key) orelse
+            return null;
+        if (!self.screenIsValid(
+            &t.screens,
+            self.active_key,
+            screen_search,
+        )) return null;
+
+        const m = screen_search.selected orelse return null;
+        const start = m.highlight.start;
+        const end = m.highlight.end;
+        if (start.garbage or end.garbage) return null;
+        return .{ .start = start.*, .end = end.* };
+    }
 };
 
 test "starts feed required and runs to complete" {
@@ -764,4 +797,101 @@ test "feed after complete discovers prepended snapshot history" {
         needle_count,
         fresh.activeScreenSearch().?.matchesLen(),
     );
+}
+
+test "selectedHighlight returns the selected match" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("Fizz\r\nBuzz\r\nFizz");
+
+    var search: TerminalSearch = try .init(alloc, "Fizz");
+    defer search.deinit(&t);
+    search.feed(&t, true);
+
+    // Nothing is selected until we navigate.
+    try testing.expect(search.selectedHighlight(&t) == null);
+
+    // The first selection is the most recent match. The end pin is
+    // inclusive, matching Selection.
+    try testing.expect(try search.select(&t, .next, .none));
+    const pages = &t.screens.active.pages;
+    {
+        const hl = search.selectedHighlight(&t).?;
+        try testing.expectEqual(
+            point.Point{ .active = .{ .x = 0, .y = 2 } },
+            pages.pointFromPin(.active, hl.start).?,
+        );
+        try testing.expectEqual(
+            point.Point{ .active = .{ .x = 3, .y = 2 } },
+            pages.pointFromPin(.active, hl.end).?,
+        );
+    }
+
+    // Navigating moves the selected match.
+    try testing.expect(try search.select(&t, .next, .none));
+    {
+        const hl = search.selectedHighlight(&t).?;
+        try testing.expectEqual(
+            point.Point{ .active = .{ .x = 0, .y = 0 } },
+            pages.pointFromPin(.active, hl.start).?,
+        );
+        try testing.expectEqual(
+            point.Point{ .active = .{ .x = 3, .y = 0 } },
+            pages.pointFromPin(.active, hl.end).?,
+        );
+    }
+}
+
+test "selectedHighlight is null after the active screen changes" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("Fizz");
+
+    var search: TerminalSearch = try .init(alloc, "Fizz");
+    defer search.deinit(&t);
+    search.feed(&t, true);
+    try testing.expect(try search.select(&t, .next, .none));
+    try testing.expect(search.selectedHighlight(&t) != null);
+
+    // The selected match belongs to the primary screen, so it must not
+    // be reported against the alternate screen, even before a feed.
+    _ = try t.switchScreen(.alternate);
+    try testing.expect(search.selectedHighlight(&t) == null);
+
+    // Switching back makes it valid again.
+    _ = try t.switchScreen(.primary);
+    try testing.expect(search.selectedHighlight(&t) != null);
+}
+
+test "selectedHighlight is null after the match content is discarded" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 2 });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("Fizz");
+
+    var search: TerminalSearch = try .init(alloc, "Fizz");
+    defer search.deinit(&t);
+    search.feed(&t, true);
+    try testing.expect(try search.select(&t, .next, .none));
+    try testing.expect(search.selectedHighlight(&t) != null);
+
+    // Resetting the screen keeps the same screen but discards its
+    // content. The tracked pins are remapped to valid memory but marked
+    // garbage, so there is no match to report.
+    t.screens.active.reset();
+    try testing.expect(search.selectedHighlight(&t) == null);
 }
