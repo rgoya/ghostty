@@ -212,6 +212,19 @@ const Search = struct {
     thread: std.Thread,
 
     pub fn deinit(self: *Search) void {
+        self.stop();
+
+        // Now it is safe to deinit the state
+        self.state.deinit();
+    }
+
+    /// Stop the search thread and wait for it to exit. The state is
+    /// still valid after this and can be read (with the terminal mutex
+    /// held) until it is deinitialized.
+    ///
+    /// The terminal mutex must NOT be held when calling this, since the
+    /// search thread may be waiting on it and would never exit.
+    pub fn stop(self: *Search) void {
         // Notify the thread to stop
         self.state.stop.notify() catch |err| log.err(
             "error notifying search thread to stop, may stall err={}",
@@ -220,9 +233,6 @@ const Search = struct {
 
         // Wait for the OS thread to quit
         self.thread.join();
-
-        // Now it is safe to deinit the state
-        self.state.deinit();
     }
 };
 
@@ -4873,6 +4883,31 @@ fn hideMouse(self: *Surface) void {
     };
 }
 
+/// End the current search if any and notify the apprt so GUIs can
+/// hide any search elements.
+fn endSearch(self: *Surface) !bool {
+    // We only return that this was performed if we actually
+    // stopped a search, but we also send the apprt end_search so
+    // that GUIs can clean up stale stuff.
+    const performed = self.search != null;
+
+    if (self.search) |*s| {
+        // We stop the thread separately from freeing its state so
+        // that we can read the final search state in between.
+        s.stop();
+        s.state.deinit();
+        self.search = null;
+    }
+
+    _ = try self.rt_app.performAction(
+        .{ .surface = self },
+        .end_search,
+        {},
+    );
+
+    return performed;
+}
+
 fn showMouse(self: *Surface) void {
     if (!self.mouse.hidden) return;
     self.mouse.hidden = false;
@@ -5033,25 +5068,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             );
         },
 
-        .end_search => {
-            // We only return that this was performed if we actually
-            // stopped a search, but we also send the apprt end_search so
-            // that GUIs can clean up stale stuff.
-            const performed = self.search != null;
-
-            if (self.search) |*s| {
-                s.deinit();
-                self.search = null;
-            }
-
-            _ = try self.rt_app.performAction(
-                .{ .surface = self },
-                .end_search,
-                {},
-            );
-
-            return performed;
-        },
+        .end_search => return try self.endSearch(),
 
         .search => |text| search: {
             const s: *Search = if (self.search) |*s| s else init: {
